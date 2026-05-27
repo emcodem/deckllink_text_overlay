@@ -1,0 +1,191 @@
+Now I have enough to deep-dive. Here's what FFmpeg does vs your code.
+
+  How FFmpeg aligns first samples (the canonical approach)
+
+  decklink_dec.cpp doesn't actually "align" anything — it trusts DeckLink to do the pairing and just records each packet's hardware timestamp verbatim. The whole
+   alignment logic is in get_pkt_pts() at line 628:
+
+  // Per-stream, on the very first valid PTS:
+  if (pts != AV_NOPTS_VALUE && *initial_pts == AV_NOPTS_VALUE)
+      *initial_pts = pts;
+  if (*initial_pts != AV_NOPTS_VALUE)
+      pts -= *initial_pts;
+
+  And the PTS sources (default for each stream):
+  - Video: videoFrame->GetStreamTime(&bmd_pts, &bmd_duration, time_base.den) — line 647
+  - Audio: audioFrame->GetPacketTime(&bmd_pts, time_base.den) — line 643
+
+  The critical detail: GetStreamTime (video) and GetPacketTime (audio) return values in the SAME clock domain — DeckLink's stream clock, zeroed at
+  StartStreams(). They are directly comparable. That's why no trim/pad is needed: each packet carries its true position in stream time, and the player/muxer
+  schedules them correctly.
+
+  There is one subtle bit of synchronization: initial_video_pts and initial_audio_pts are tracked separately. The first video frame anchors video at PTS=0; the
+  first audio packet anchors audio at PTS=0. This works because in VideoInputFrameArrived DeckLink delivers video+audio for the same interval in the same
+  callback — so both initial PTS values are essentially equal (within microseconds), and the cross-stream offset comes out near zero in the file.
+
+  What's broken in your stack
+
+  Three things compound:
+
+  1. Your hw_pts fields are in different clock domains. In decklink_com.py:
+  - Video: videoFrame.GetHardwareReferenceTimestamp(TIMESCALE) — line 159
+  - Audio: audioPacket.GetPacketTime(TIMESCALE) — line 202
+
+  These are not the same clock. GetHardwareReferenceTimestamp is the card's reference clock (10 MHz since some hardware epoch); GetPacketTime is stream-time
+  since StartStreams(). The memory entry confirms this — audio hw_pts starts near 400 k ticks, video near 1.9e12. You can't compare them. This is why you fell
+  back to wall-clock-driven alignment + counter PTS.
+
+  For an FFmpeg-style fix: change video to videoFrame.GetStreamTime(TIMESCALE) (returns (streamTime, frameDuration)) so both streams share the same clock domain.
+   Then the FFmpeg pattern works directly — anchor each stream to its first valid pts, write it as PTS, done.
+
+  2. Your alignment uses wall-clock timestamps captured at the SAME instant. In the COM callback, both frame.timestamp and audio.timestamp are set to time.time()
+   - start_time ~microseconds apart — they're both "end of the 40 ms interval that just finished." _align_audio_to_video then computes delta ≈ 0 and does
+  nothing. The logs confirm this: every alignment in the .ts recording reported "video leads audio by 0.5–1.0 ms; prepending 24–48 silent samples." That's
+  correct in theory but it means your alignment isn't doing anything beyond a sub-ms trim — and if there's any actual offset baked in by DeckLink's packet
+  pairing, you won't see it.
+
+  3. Your real run is dropping frames. Latest MXF log: 951 frames over 39.3 s = 24.2 fps, not 25. gaps=3, max_drift_ms=131.4. Whatever is bottlenecking the loop
+  (the GUI queue, the encoder, the per-frame numpy concatenation in _append_audio) is dropping ~30 frames out of ~982. That alone won't cause a stable 40 ms
+  offset, but it makes your sync measurements untrustworthy — and the underrun warnings (audio buffer underrun for frame #2 — padded 1920 silent samples) show
+  frame 2 was encoded with silent placeholder audio, which shifts the analyzer's reference.
+
+  On the actual 40 ms residue
+
+  If the .ts recording's alignment log says "off by 0.5 ms" but the analyzer says "off by 40 ms", the offset isn't entering at alignment time — it's downstream.
+  Two prime suspects:
+
+  - The player's video decode pipeline lag. Most h264 decoders hold ~1 frame in the reorder/display buffer even with I-only streams. PCM has zero. Verify by
+  extracting both elementary streams (ffmpeg -i monitoring.mxf -map 0:v -c copy v.h264 and -map 0:a -c copy a.wav) and have your analyzer reads the timestamps
+  from ffprobe -show_packets directly — bypasses the player entirely.
+  - First-frame audio underrun. Your log shows frame #2 — padded 1920 silent samples. If the analyzer scores video sync against the first frame where audio
+  actually contains the click, but frame 1's audio is silence, you'll get a frame's worth of measured offset regardless of true sync.
+
+  Concrete next steps
+
+  1. Switch video pts source. In decklink_com.py:159, replace GetHardwareReferenceTimestamp(TIMESCALE) with GetStreamTime(TIMESCALE) (the SDK signature is
+  GetStreamTime(out frameTime, out frameDuration, timeScale)). Both video and audio then share the stream-time clock. Verify the memory note's "audio starts at
+  ~400000, video at ~1.9e12" disappears — you should see them within a few microseconds of each other on the first valid pair.
+  2. Try the FFmpeg pattern directly for one recording: bypass _align_audio_to_video and the counter PTS entirely. Use video.pts = (video.hw_pts -
+  initial_video_hw_pts) rescaled to the video time_base, and audio.pts = (audio.hw_pts - initial_audio_hw_pts) rescaled to 48 kHz. Skip the buffer/consume dance
+  — just push each packet straight through with its real PTS. Then compare the analyzer numbers against your current pipeline. If FFmpeg's approach also reports
+  ~40 ms, the offset is player-side; if it goes to ~0, your alignment is the cause.
+  3. Probe the file before believing the player. ffprobe -show_packets -of csv monitoring.mxf | head will show the actual PTS of packet 0 for each stream. If
+  video.pts[0] and audio.pts[0] are within a few hundred microseconds, the file is fine and the analyzer/player is lying.
+  4. Fix the dropped frames separately. 24.2 fps is its own bug — the underrun + framerate mismatch will keep contaminating sync measurements until that's
+  stable. Look at the audio queue and GUI queue high-water marks in [av_sync_health] — the bottleneck is likely there or in np.concatenate thrashing inside
+  _append_audio at high audio rates.
+
+  The TL;DR of FFmpeg's design: never align by wall-clock or by trimming — let each packet carry its own hardware-stream-time PTS, anchored per-stream to its
+  first valid value. DeckLink already pairs A/V correctly inside the callback; your job is just to record what it tells you.
+
+✻ Cogitated for 7m 57s · 2 shells still running
+
+> ok implement it but are you sure about the dropping and 951 frames over 39.3 s = 24.2 fps, not 25. Could this come from initialisation phase only and we need
+  to wait a little until its stabilized? also, consider that we support changing framerates and reinitialisation while ffmpeg might not do that (maybe it does,
+  i dont know)
+  ⎿  API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment. If it persists, check status.claude.com.
+
+✻ Cogitated for 3m 33s · 2 shells still running
+
+> try again
+  ⎿  Retrying in 1s · attempt 3/10
+
+================================================================================
+UPDATE 2026-05-15 — Revised investigation, corrects prior session
+================================================================================
+
+  The previous session's claim that the pipeline drops ~30 frames out of ~982
+  ("951 frames over 39.3s = 24.2 fps, not 25") is WRONG. Re-checked against
+  logs/ffcapture.log.
+
+  Q1: Is the 24.2 fps a real drop, or an init-phase artifact?
+
+  Init-phase artifact. The "fps" in `Progress: N frames (X.X fps)` is computed
+  as `frames_captured / (time.time() - self.start_time)` (pipeline.py:312-313).
+  `_start_time` is set in `pipeline.start()` BEFORE `VideoInputFormatChanged`
+  fires and the `_framerate[0] is None` gate opens (decklink_com.py:143-146).
+  There's ~0.4-1.0s of dead time at the front of every run that the cumulative
+  average never recovers from on short recordings.
+
+  Evidence:
+  - Delta between consecutive Progress: lines is exactly 100 frames / 4s = 25.0
+    fps, line after line. The cumulative value just converges asymptotically:
+    e.g. the 17:35 run: 21.7 -> 23.2 -> 23.8 -> 24.1 -> 24.2 -> 24.3 -> ... ->
+    24.9 -> 25.0 (reached at frame 8400, log line 106484).
+  - `frame_queue_hi=0, audio_queue_hi=0` in every [av_sync_health] log -
+    queues never back up. Direct counter-evidence to the previous session's
+    "GUI queue / encoder / np.concatenate bottleneck" theory.
+  - `[av_sync_anchor] ... anchor_wall_seconds=0.35-0.45` consistently - that
+    is exactly the init dead-time.
+  - The "frame #2 underrun" warning is also init-only: audio buffer hasn't
+    accumulated yet by the time frame 2 is encoded. Does not recur in steady
+    state.
+
+  Real signal gaps DO appear (`video gap detected delta=1107700 expected=400000
+  missing~1.8 frames`), but sparse (~5 per 3064 frames = 0.16%) and almost
+  certainly real input-side discontinuities, not pipeline drops.
+
+  Verdict: no frame-drop problem. The previous Claude built its argument on a
+  false premise.
+
+  Q2: Does FFmpeg's strategy destroy our framerate-change / reinit support?
+
+  No - they're complementary.
+
+  decklink_dec.cpp does NOT change framerate mid-stream (FFmpeg restarts the
+  whole graph for that). But its per-stream `initial_pts` anchor is a single
+  integer that resets cleanly into our rotation:
+
+  - `_rotate_for_framerate_change` (outputs.py:464) already creates a fresh
+    container with its own timebase -> the new file restarts at PTS=0.
+  - Change needed: at rotation, also reset `initial_video_hw_pts` and
+    `initial_audio_hw_pts` to None so each new file re-anchors on the first
+    valid PTS in the new clock domain. Two extra `= None` lines.
+  - `_align_audio_to_video` (outputs.py:370) becomes REDUNDANT under FFmpeg's
+    strategy - DeckLink's same-clock packet pairing inside VideoInputFrameArrived
+    handles cross-stream alignment for free. Delete the wall-clock trim/pad
+    code, don't work around it.
+  - The fps-counter `_video_pts` (outputs.py:522) is a degenerate special case
+    of FFmpeg's anchored-pts approach assuming no gaps. Switching to anchored
+    hw_pts gives correct PTS THROUGH real signal gaps for free - strict upgrade.
+
+  Q3: Add logging first?
+
+  Yes, strongly recommended. Concrete proposal:
+
+  In `decklink_com.py` `VideoInputFrameArrived`, for the first ~20 frames after
+  each `VideoInputFormatChanged`, log all three side-by-side:
+  - video: `GetHardwareReferenceTimestamp(TIMESCALE)` AND `GetStreamTime(TIMESCALE)`
+    (both confirmed available in
+    venv\Lib\site-packages\comtypes\gen\_D864517A_..._0_1_0.py:2916/2924,
+    both return tuple(frameTime, frameDuration))
+  - audio: `GetPacketTime(TIMESCALE)` (single packetTime out)
+  - On every VideoInputFormatChanged, repeat the trio for the next 20 frames
+    so we can observe what happens to the values across a framerate change /
+    signal restart.
+
+  This tells us, with real numbers from this hardware:
+  1. Whether GetStreamTime really resets to ~0 at StartStreams()
+     (FFmpeg's load-bearing assumption)
+  2. Whether video-GetStreamTime and audio-GetPacketTime are within a frame of
+     each other on the first pair (they should be, per decklink_dec.cpp)
+  3. How both values behave across a mid-run framerate change
+
+  Cost: ~20 lines, zero behavior change. Decide the actual switch from data
+  rather than SDK assumptions.
+
+  Plan, in order:
+  1. Add the diagnostic logging.
+  2. Run one normal recording + one with deliberate framerate change.
+  3. Inspect the numbers.
+  4. Then do the GetStreamTime switch + delete wall-clock alignment +
+     reset hw_pts anchors on rotation.
+  5. Verify with the analyzer.
+
+  Open questions to resolve from the data:
+  - Audio: is `hw_pts_valid=(hw_pts != 0)` (capture.py:202) misclassifying the
+    very first audio packet (which legitimately may have packetTime=0)? The
+    [av_sync_warn] hw_pts_valid=False mid-stream (audio #1) appears at the
+    start of every recording.
+  - Does GetStreamTime monotonically continue across the PauseStreams/
+    FlushStreams/StartStreams cycle in VideoInputFormatChanged, or reset to 0?

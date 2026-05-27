@@ -1,0 +1,23 @@
+# FFCapture Project Dependencies
+# Install with: ./setup.ps1
+# NOTE: Custom PyAV wheel with NVENC support is in vendor/
+# setup.ps1 uses --find-links to prefer vendor/av-*.whl over PyPI
+
+# Video/Audio Processing
+av>=17.0.0              # PyAV - FFmpeg bindings (custom build in vendor/)
+opencv-python>=4.9.0   # OpenCV - image processing and text rendering
+numpy>=1.24.0          # NumPy - array operations
+
+# GUI Framework
+PyQt6>=6.6.0           # PyQt6 - desktop GUI for live monitoring
+sounddevice>=0.4.6     # Audio preview playback in GUI
+
+# Windows COM/DeckLink
+comtypes>=1.4.0        # COM bindings for DeckLink vtable interfaces (cross-platform)
+
+# Utilities
+python-dotenv>=1.0.0   # Environment variable management
+
+# Development (optional, for testing/debugging)
+# pytest>=7.4.0
+# pytest-cov>=4.1.0
