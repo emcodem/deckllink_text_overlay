@@ -189,10 +189,8 @@ def _create_input_callback(frame_callback=None, audio_callback=None, audio_chann
                                 f"valid={video_hw_pts_valid}"
                             )
 
-                        # Get the frame buffer
-                        video_buffer = videoFrame.QueryInterface(decklink_module.IDeckLinkVideoBuffer)
-                        video_buffer.StartAccess(decklink_module.bmdBufferAccessRead)
-                        buffer_ptr = video_buffer.GetBytes()
+                        # Get the frame buffer directly via IDeckLinkVideoFrame.GetBytes()
+                        buffer_ptr = videoFrame.GetBytes()
 
                         if buffer_ptr:
                             # Copy frame data to bytes
@@ -202,8 +200,6 @@ def _create_input_callback(frame_callback=None, audio_callback=None, audio_chann
 
                             frame_callback(frame_bytes, width, height, pixel_format, _framerate[0], 0, row_bytes,
                                            video_hw_pts, TIMESCALE, video_hw_pts_valid)
-
-                        video_buffer.EndAccess(decklink_module.bmdBufferAccessRead)
                     except Exception as e:
                         logger.error(f"Error processing video frame: {e}")
 
