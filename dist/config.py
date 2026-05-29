@@ -24,7 +24,7 @@ LOGS_DIR.mkdir(exist_ok=True)
 
 # DeckLink device configuration
 CAPTURE_DEVICE_INDEX = 0      # Primary DeckLink card for input
-PLAYOUT_DEVICE_INDEX = 1      # Secondary DeckLink card for output
+#PLAYOUT_DEVICE_INDEX = 1      # Secondary DeckLink card for output
 SIMULATE_HARDWARE = False      # Set True to use video file instead of hardware
 
 # Hardware display mode (when SIMULATE_HARDWARE=False)

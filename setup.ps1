@@ -8,6 +8,11 @@ param(
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venvPath = Join-Path $projectRoot "venv"
+$PYTHON = "$projectRoot\..\python311_portable\python.exe"
+if (-not (Test-Path $PYTHON)) {
+    Write-Error "Portable Python not found at '$PYTHON'. Ensure python311_portable is in the repo root."
+    exit 1
+}
 
 Write-Host "FFCapture Project Setup" -ForegroundColor Green
 Write-Host "======================" -ForegroundColor Green
@@ -21,7 +26,7 @@ if ($Clean -and (Test-Path $venvPath)) {
 # Create virtual environment
 if (-not (Test-Path $venvPath)) {
     Write-Host "`nCreating virtual environment..." -ForegroundColor Cyan
-    python -m venv $venvPath
+    & $PYTHON -m venv $venvPath
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Failed to create virtual environment" -ForegroundColor Red
         exit 1
@@ -38,7 +43,7 @@ Write-Host "`nActivating virtual environment..." -ForegroundColor Cyan
 
 # Upgrade pip
 Write-Host "`nUpgrading pip..." -ForegroundColor Cyan
-python -m pip install --upgrade pip
+& "$venvPath\Scripts\python.exe" -m pip install --upgrade pip
 
 # Install dependencies
 if (-not $SkipDependencies) {

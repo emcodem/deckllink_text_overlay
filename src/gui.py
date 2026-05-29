@@ -391,12 +391,15 @@ class SubtitleConfigDialog(QDialog):
         """Write current values to config_subtitles.py, then apply."""
         self._apply()
         cfg = self._cfg
-        # Locate the file via the module's __file__ attribute
-        try:
-            file_path = Path(cfg.__file__)
-        except AttributeError:
-            logger.error("Cannot locate config_subtitles.py — save failed")
-            return
+        # When frozen, write next to the exe; otherwise next to the source file
+        if getattr(sys, 'frozen', False):
+            file_path = Path(sys.executable).parent / "config_subtitles.py"
+        else:
+            try:
+                file_path = Path(cfg.__file__)
+            except AttributeError:
+                logger.error("Cannot locate config_subtitles.py — save failed")
+                return
 
         content = self._generate_file(cfg)
         try:

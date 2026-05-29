@@ -6,7 +6,10 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+FFCapture.exe
+ffcapture.exe
+*.log
+logs/
 downloads/
 eggs/
 .eggs/

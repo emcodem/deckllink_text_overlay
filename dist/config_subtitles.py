@@ -5,7 +5,7 @@ The running overlay picks up changes applied via the dialog without restart.
 """
 
 # Incremented by the Subtitle Settings dialog on Apply/Save — overlay detects this
-_config_version: int = 16
+_config_version: int = 27
 
 # Text file source
 TEXT_FILE: str = r"C:\temp\lines.txt"
@@ -13,7 +13,7 @@ TEXT_CHECK_INTERVAL: int = 30  # Check text file for changes every N frames
 
 # Font
 TEXT_FONT_PATH: str = r"C:\Windows\Fonts\arial.ttf"
-TEXT_FONT_SIZE: int = 70
+TEXT_FONT_SIZE: int = 50
 TEXT_FONT_BOLD: bool = False
 TEXT_FONT_ITALIC: bool = False
 
@@ -23,18 +23,10 @@ TEXT_BG_COLOR: tuple = (0, 0, 0)      # Black background
 TEXT_BG_ALPHA: int = 167              # 0 = transparent, 255 = opaque
 
 # Padding inside background box (pixels)
-TEXT_BG_PADDING_X: int = 200
+TEXT_BG_PADDING_X: int = 8
 TEXT_BG_PADDING_Y: int = 8
 
 # Position
 TEXT_OFFSET_BOTTOM: int = 98    # Pixels from bottom edge
 TEXT_ALIGN: str = "center"      # "left", "center", or "right"
 TEXT_LINE_SPACING: float = 1.2  # Line height multiplier
-
-# When running as a compiled exe, load overrides from config_subtitles.py next to the exe
-import sys as _sys
-if getattr(_sys, 'frozen', False):
-    from pathlib import Path as _Path
-    _external = _Path(_sys.executable).parent / "config_subtitles.py"
-    if _external.exists():
-        exec(_external.read_text(encoding="utf-8"), globals())
