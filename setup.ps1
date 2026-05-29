@@ -26,7 +26,7 @@ if ($Clean -and (Test-Path $venvPath)) {
 # Create virtual environment
 if (-not (Test-Path $venvPath)) {
     Write-Host "`nCreating virtual environment..." -ForegroundColor Cyan
-    & $PYTHON -m venv $venvPath
+    & $PYTHON -m virtualenv $venvPath
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Failed to create virtual environment" -ForegroundColor Red
         exit 1
@@ -51,7 +51,7 @@ if (-not $SkipDependencies) {
     $vendorDir = Join-Path $projectRoot "vendor"
     Write-Host "`nInstalling dependencies from requirements.txt..." -ForegroundColor Cyan
     Write-Host "Using custom PyAV from vendor/" -ForegroundColor Yellow
-    pip install --find-links="$vendorDir" -r $requirementsFile
+    & "$venvPath\Scripts\pip.exe" install --find-links="$vendorDir" -r $requirementsFile
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Failed to install dependencies" -ForegroundColor Red
         exit 1
