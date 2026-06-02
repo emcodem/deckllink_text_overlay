@@ -63,3 +63,7 @@ Write-Host "`n" -ForegroundColor Green
 Write-Host "Setup complete!" -ForegroundColor Green
 Write-Host "To use the project, run: .\venv\Scripts\Activate.ps1" -ForegroundColor Cyan
 Write-Host "Then run: python src\main.py" -ForegroundColor Cyan
+
+# Build the executable
+Write-Host "`nBuilding FFCapture..." -ForegroundColor Cyan
+& "$projectRoot\build.ps1"
