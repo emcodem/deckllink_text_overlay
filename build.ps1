@@ -39,7 +39,10 @@ VSVersionInfo(
 "@ | Set-Content $resourceFile -Encoding UTF8
 
 # --- Build ------------------------------------------------------------------
-& "$PSScriptRoot\venv\Scripts\pyinstaller.exe" "$PSScriptRoot\ffcapture.spec"
+& "$PSScriptRoot\venv\Scripts\pyinstaller.exe" `
+    --distpath "$PSScriptRoot\dist" `
+    --workpath "$PSScriptRoot\build" `
+    "$PSScriptRoot\ffcapture.spec"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "Build complete: dist\FFCapture.exe  ($version)"

@@ -7,7 +7,7 @@ datas_sd,  binaries_sd,  hidden_sd  = collect_all('sounddevice')
 
 a = Analysis(
     ['src/main.py'],
-    pathex=['.'],
+    pathex=[SPECPATH],
     binaries=binaries_av + binaries_cv2 + binaries_qt + binaries_sd,
     datas=datas_av + datas_cv2 + datas_qt + datas_sd,
     hiddenimports=(
