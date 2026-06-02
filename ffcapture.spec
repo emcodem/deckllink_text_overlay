@@ -4,14 +4,15 @@ datas_av,  binaries_av,  hidden_av  = collect_all('av')
 datas_cv2, binaries_cv2, hidden_cv2 = collect_all('cv2')
 datas_qt,  binaries_qt,  hidden_qt  = collect_all('PyQt6')
 datas_sd,  binaries_sd,  hidden_sd  = collect_all('sounddevice')
+datas_pil, binaries_pil, hidden_pil = collect_all('PIL')
 
 a = Analysis(
     ['src/main.py'],
     pathex=[SPECPATH],
-    binaries=binaries_av + binaries_cv2 + binaries_qt + binaries_sd,
-    datas=datas_av + datas_cv2 + datas_qt + datas_sd,
+    binaries=binaries_av + binaries_cv2 + binaries_qt + binaries_sd + binaries_pil,
+    datas=datas_av + datas_cv2 + datas_qt + datas_sd + datas_pil,
     hiddenimports=(
-        hidden_av + hidden_cv2 + hidden_qt + hidden_sd + [
+        hidden_av + hidden_cv2 + hidden_qt + hidden_sd + hidden_pil + [
             'comtypes.stream',
             'comtypes.client',
             'win32api',

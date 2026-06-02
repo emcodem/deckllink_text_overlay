@@ -7,6 +7,7 @@
 av>=17.0.0              # PyAV - FFmpeg bindings (custom build in vendor/)
 opencv-python>=4.9.0   # OpenCV - image processing and text rendering
 numpy>=1.24.0          # NumPy - array operations
+Pillow>=10.0.0         # PIL - text rendering for overlay
 
 # GUI Framework
 PyQt6>=6.6.0           # PyQt6 - desktop GUI for live monitoring
