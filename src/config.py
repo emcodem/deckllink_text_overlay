@@ -80,6 +80,9 @@ SKIP_GUI = False                    # Skip GUI window (headless mode) - set True
 SKIP_OVERLAY = False               # Skip text overlay - set False to enable
 BENCHMARK_FRAME_PROCESSING = False # Print frame processing times
 
+# Embed the captured audio (all AUDIO_CHANNELS, 48 kHz 16-bit) in the SDI playout.
+AUDIO_PLAYOUT = True              # measured on KI-UT5 1080i50: audio ~50 ms later than video at SDI out
+
 # Video passthrough: keep the captured 8-bit UYVY picture, blend the subtitle directly into it and
 # play it out unchanged (no colour/range conversion of the picture at all). RGB is only derived for
 # the GUI preview and encoding outputs. False = old path (UYVY -> RGB -> overlay -> UYVY).

@@ -237,6 +237,9 @@ class Pipeline:
                 logger.info(f"Audio drained: shape={audio.data.shape}, channels={audio.channels}, "
                             f"hw_pts_valid={audio.hw_pts_valid}")
             self._dispatch_audio(audio)
+            # Embed the audio in the SDI playout (was never wired before 2026-11-19: SDI out was silent)
+            if self.playout and not config.SKIP_PLAYOUT and getattr(config, 'AUDIO_PLAYOUT', True):
+                self.playout.put_audio(audio)
             # Feed GUI audio preview (non-blocking — drop on full)
             if self.gui_audio_queue is not None:
                 try:

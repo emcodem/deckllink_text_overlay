@@ -1,6 +1,7 @@
 """DeckLink COM wrapper using comtypes (auto-generated from type library)."""
 
 import logging
+import time
 from typing import Optional, Callable
 import numpy as np
 import ctypes
@@ -541,6 +542,13 @@ class DeckLinkCOM:
             logger.error(f"Error putting video frame: {e}")
             return False
 
+    def get_audio_buffered(self) -> int:
+        """Audio sample frames waiting in the output buffer (= audio latency in samples), -1 if unknown."""
+        try:
+            return int(self.decklink_output.GetBufferedAudioSampleFrameCount())
+        except Exception:
+            return -1
+
     def put_audio_samples(self, audio_data: np.ndarray, sample_rate: int, channels: int) -> bool:
         """Send audio samples to the output.
 
@@ -570,22 +578,29 @@ class DeckLinkCOM:
                 self._audio_output_started = True
                 logger.debug("Audio output enabled")
 
-            # Convert to contiguous bytes
-            if not audio_data.flags['C_CONTIGUOUS']:
-                audio_data = np.ascontiguousarray(audio_data)
+            # Convert to contiguous int16 (samples x channels)
+            audio_data = np.ascontiguousarray(audio_data, dtype=np.int16)
 
             sample_count = audio_data.shape[0]
-            buffer_ptr = audio_data.ctypes.data_as(c_void_p)
-
-            # comtypes returns 'out' params as the return value — don't pass byref manually
-            samples_written = self.decklink_output.WriteAudioSamplesSync(
-                buffer_ptr,
-                sample_count,
-            )
-
-            if samples_written < sample_count:
-                logger.debug(f"Audio: wrote {samples_written}/{sample_count} samples")
-
+            frame_bytes = audio_data.strides[0]
+            written_total = 0
+            # comtypes returns 'out' params as the return value — don't pass byref manually.
+            # A partial write means the device buffer is momentarily full: write the rest instead
+            # of silently dropping it (that would be an audible click).
+            for _ in range(4):
+                remaining = sample_count - written_total
+                if remaining <= 0:
+                    break
+                ptr = c_void_p(audio_data.ctypes.data + written_total * frame_bytes)
+                written = self.decklink_output.WriteAudioSamplesSync(ptr, remaining)
+                written_total += int(written or 0)
+                if written_total < sample_count:
+                    time.sleep(0.002)
+            if written_total < sample_count:
+                self._audio_samples_dropped = getattr(self, '_audio_samples_dropped', 0) + sample_count - written_total
+                logger.warning(f"Audio output buffer full: dropped {sample_count - written_total} samples "
+                               f"(total {self._audio_samples_dropped})")
+            self._audio_samples_written = getattr(self, '_audio_samples_written', 0) + written_total
             return True
 
         except Exception as e:

@@ -28,7 +28,9 @@ class DeckLinkPlayout:
         """
         self.device_index = device_index
         self.frame_queue = queue.Queue(maxsize=4)
-        self.audio_queue = queue.Queue(maxsize=4)
+        # ~1 audio packet per video frame arrives; room for ~1 s so short stalls do not drop audio
+        self.audio_queue = queue.Queue(maxsize=32)
+        self._dropped_audio = 0
 
         self.is_running = False
         self.playout_thread = None
@@ -100,8 +102,9 @@ class DeckLinkPlayout:
         try:
             self.audio_queue.put(audio, block=False)
         except queue.Full:
-            if self._dropped_frames % 30 == 0:
-                logger.debug("Audio queue full")
+            self._dropped_audio += 1
+            if self._dropped_audio % 25 == 1:
+                logger.warning(f"Playout audio queue full, dropped {self._dropped_audio} audio packets")
 
     def _playout_loop(self):
         """Main playout thread loop."""
@@ -128,20 +131,25 @@ class DeckLinkPlayout:
                         self._frame_count += 1
                         if self._frame_count % 100 == 0:
                             logger.debug(f"Playout frame {self._frame_count}")
+                        if self._frame_count % 250 == 0 and getattr(self.decklink, '_audio_output_started', False):
+                            buffered = self.decklink.get_audio_buffered()
+                            logger.info(f"[audio_playout] buffered {buffered} samples "
+                                        f"({buffered / 48:.0f} ms), buffer-full drops "
+                                        f"{getattr(self.decklink, '_audio_samples_dropped', 0)} samples")
                     except queue.Empty:
                         pass
 
-                    # Also handle audio queue
-                    try:
-                        audio = self.audio_queue.get(block=False)
-                        if self.decklink:
-                            self.decklink.put_audio_samples(
-                                audio.data,
-                                audio.sample_rate,
-                                audio.channels
-                            )
-                    except queue.Empty:
-                        pass
+                    # Audio: write everything pending once video output runs (audio is enabled after
+                    # video on the same output). Before that, discard it: stale audio written in one
+                    # burst would overflow the output buffer and only add latency.
+                    video_running = bool(self.decklink and getattr(self.decklink, '_output_started', False))
+                    while True:
+                        try:
+                            audio = self.audio_queue.get(block=False)
+                        except queue.Empty:
+                            break
+                        if video_running:
+                            self.decklink.put_audio_samples(audio.data, audio.sample_rate, audio.channels)
 
                     # Sleep briefly to avoid busy-waiting
                     time.sleep(0.001)
