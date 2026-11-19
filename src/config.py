@@ -80,7 +80,12 @@ SKIP_GUI = False                    # Skip GUI window (headless mode) - set True
 SKIP_OVERLAY = False               # Skip text overlay - set False to enable
 BENCHMARK_FRAME_PROCESSING = False # Print frame processing times
 
-# Playout colour handling (tested on SDI 2026-11-17)
+# Video passthrough: keep the captured 8-bit UYVY picture, blend the subtitle directly into it and
+# play it out unchanged (no colour/range conversion of the picture at all). RGB is only derived for
+# the GUI preview and encoding outputs. False = old path (UYVY -> RGB -> overlay -> UYVY).
+VIDEO_PASSTHROUGH = True
+
+# Playout colour handling for RGB sources (old path / simulation; tested on SDI 2026-11-17)
 FIX_PLAYOUT_COLORS = True          # Fix red/blue swap on SDI playout (False = original behaviour)
 PLAYOUT_BROADCAST_RANGE = True     # SDI output in BT.601 limited range 16-235 (False = old full-range conversion)
 

@@ -26,6 +26,18 @@ class Frame:
     hw_pts: int = 0            # Hardware reference clock ticks (DeckLink or PyAV demuxer)
     hw_pts_rate: int = 10_000_000  # Ticks per second (DeckLink native = 10 MHz)
     hw_pts_valid: bool = False # False when no hardware clock available
+    # Passthrough: the original 8-bit UYVY picture (H x 2W, writable). When set, the overlay is
+    # blended into it and playout sends it unchanged; `data` (RGB) is then only derived on demand
+    # for the GUI / encoding outputs via ensure_rgb().
+    uyvy: Optional[np.ndarray] = None
+
+    def ensure_rgb(self) -> np.ndarray:
+        """Fill `data` (RGB24) from `uyvy` if it is not there yet (BT.601 limited range, like PyAV)."""
+        if self.data is None and self.uyvy is not None:
+            import cv2
+            self.data = cv2.cvtColor(self.uyvy.reshape(self.height, self.width, 2), cv2.COLOR_YUV2RGB_UYVY)
+            self.format = 'RGB24'
+        return self.data
 
 
 @dataclass
@@ -147,16 +159,26 @@ class DeckLinkCapture:
                 logger.info(f"Expected size (height * width * 2): {height * width * 2}")
                 logger.info(f"Expected size (height * row_bytes): {height * row_bytes if row_bytes else 'N/A'}")
                 logger.info(f"============================")
-            # Convert DeckLink frame data to NumPy array
-            frame_array = self._convert_frame_data(frame_data, width, height, pixel_format, row_bytes)
-
-            if frame_array is None:
-                logger.error(f"Frame conversion returned None! format={pixel_format:#x}, data_len={len(frame_data) if frame_data else 0}")
-                return
+            from .decklink_com import BMDPixelFormat
+            from . import config as _config
+            uyvy = None
+            if pixel_format == BMDPixelFormat.bmdFormat8BitYUV and getattr(_config, 'VIDEO_PASSTHROUGH', True):
+                # Passthrough: keep the original UYVY (writable copy, row padding removed);
+                # RGB is derived later only if the GUI / an encoding output needs it.
+                stride = row_bytes if row_bytes else width * 2
+                uyvy = np.frombuffer(frame_data, dtype=np.uint8).reshape((height, stride))[:, :width * 2].copy()
+                frame_array = None
+            else:
+                # Convert DeckLink frame data to NumPy array
+                frame_array = self._convert_frame_data(frame_data, width, height, pixel_format, row_bytes)
+                if frame_array is None:
+                    logger.error(f"Frame conversion returned None! format={pixel_format:#x}, data_len={len(frame_data) if frame_data else 0}")
+                    return
 
             frame = Frame(
+                uyvy=uyvy,
                 data=frame_array,
-                format=self._get_format_name(pixel_format),
+                format='UYVY' if uyvy is not None else self._get_format_name(pixel_format),
                 width=width,
                 height=height,
                 framerate=framerate,

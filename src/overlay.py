@@ -178,11 +178,17 @@ class TextOverlay:
             text_y = box_y + self.bg_padding_y - bbox[1]
             draw.multiline_text((text_x, text_y), text, font=font, fill=(*self.color, 255), spacing=spacing, align="center")
 
+            # Frames are RGB (or UYVY in passthrough), so keep the overlay as RGBA
             rgba = np.array(frame_img, dtype=np.uint8)
-            bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
 
-            self._cache_overlay = bgra
-            self._cache_roi = (box_y, box_y + box_h, box_x, box_x + box_w)
+            # ROI on even x so it covers whole UYVY pixel pairs
+            y1, y2 = box_y, min(height, box_y + box_h + 1)
+            x1 = box_x - (box_x % 2)
+            x2 = min(width - (width % 2), box_x + box_w + 1 + ((box_x + box_w + 1) % 2))
+            self._prepare_blend(rgba[y1:y2, x1:x2])
+
+            self._cache_overlay = rgba
+            self._cache_roi = (y1, y2, x1, x2)
             self._cache_text = text
             self._cache_dims = (width, height)
 
@@ -190,20 +196,51 @@ class TextOverlay:
             logger.error(f"Error rendering text overlay: {e}", exc_info=True)
             self._cache_overlay = None
 
+    def _prepare_blend(self, roi_rgba: np.ndarray):
+        """Precompute premultiplied overlay + inverse alpha (uint16) for RGB and UYVY blending.
+
+        Done once per text change, so the per-frame blend is one integer multiply-add over the
+        subtitle box. UYVY uses BT.601 limited range (inverse of the capture conversion); chroma
+        is premultiplied and averaged per pixel pair (4:2:2).
+        """
+        a = roi_rgba[:, :, 3].astype(np.uint16)
+        rgb = roi_rgba[:, :, :3]
+        self._rgb_pm = rgb.astype(np.uint16) * a[:, :, None]
+        self._rgb_inv = (255 - a)[:, :, None]
+
+        f = rgb.astype(np.float32)
+        y = 16.0 + f @ np.array([0.299, 0.587, 0.114], np.float32) * (219.0 / 255.0)
+        cb = 128.0 + f @ np.array([-0.168736, -0.331264, 0.5], np.float32) * (224.0 / 255.0)
+        cr = 128.0 + f @ np.array([0.5, -0.418688, -0.081312], np.float32) * (224.0 / 255.0)
+        af = a.astype(np.float32)
+        h, w = a.shape
+        pm = np.empty((h, w * 2), np.uint16)
+        inv = np.empty((h, w * 2), np.uint16)
+        pm[:, 1::2] = np.rint(y * af)
+        inv[:, 1::2] = 255 - a
+        a_pair = (af[:, 0::2] + af[:, 1::2]) / 2
+        pm[:, 0::4] = np.rint((cb[:, 0::2] * af[:, 0::2] + cb[:, 1::2] * af[:, 1::2]) / 2)
+        pm[:, 2::4] = np.rint((cr[:, 0::2] * af[:, 0::2] + cr[:, 1::2] * af[:, 1::2]) / 2)
+        inv[:, 0::4] = inv[:, 2::4] = np.rint(255 - a_pair)
+        self._uyvy_pm, self._uyvy_inv = pm, inv
+
+    @staticmethod
+    def _mix(bg: np.ndarray, pm: np.ndarray, inv: np.ndarray) -> np.ndarray:
+        # (bg * (255 - a) + fg * a) / 255, rounded; max 255*255 + 127 fits in uint16
+        x = bg.astype(np.uint16) * inv + pm + 128
+        return ((x + (x >> 8)) >> 8).astype(np.uint8)
+
     def _blend(self, frame: Frame):
-        """Alpha-blend cached overlay onto frame data in-place."""
-        overlay = self._cache_overlay
-        if overlay is None:
+        """Alpha-blend the cached overlay into the frame in place (UYVY in passthrough, else RGB)."""
+        if self._cache_overlay is None:
             return
-
         y1, y2, x1, x2 = self._cache_roi
-
-        fg_bgra = overlay[y1:y2, x1:x2]
-        alpha = fg_bgra[:, :, 3:4].astype(np.float32) / 255.0
-        fg_bgr = fg_bgra[:, :, :3].astype(np.float32)
-        bg = frame.data[y1:y2, x1:x2].astype(np.float32)
-
-        frame.data[y1:y2, x1:x2] = (fg_bgr * alpha + bg * (1.0 - alpha)).astype(np.uint8)
+        if getattr(frame, 'uyvy', None) is not None:
+            roi = frame.uyvy[y1:y2, 2 * x1:2 * x2]
+            roi[:] = self._mix(roi, self._uyvy_pm, self._uyvy_inv)
+        else:
+            roi = frame.data[y1:y2, x1:x2]
+            roi[:] = self._mix(roi, self._rgb_pm, self._rgb_inv)
 
     def _update_text(self):
         """Read up to 2 lines from text file, handling UTF-8 BOM."""

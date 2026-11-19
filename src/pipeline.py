@@ -281,6 +281,11 @@ class Pipeline:
                 else:
                     self.stats['frames_processed'] += 1
 
+                # Passthrough frames carry only UYVY; derive RGB (with the overlay already in it)
+                # only for consumers that need it.
+                if frame.data is None and ((self.gui and self.gui_queue) or self.outputs):
+                    frame.ensure_rgb()
+
                 # 5. Send to GUI (skip if behind)
                 if self.gui and self.gui_queue:
                     try:
