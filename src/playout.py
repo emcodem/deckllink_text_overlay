@@ -116,12 +116,13 @@ class DeckLinkPlayout:
                         # Convert frame to DeckLink format (UYVY for YUV422)
                         frame_data = self._convert_to_decklink_format(frame)
 
-                        # Output frame
+                        # Output frame (+ closed captions in VANC when enabled)
                         if self.decklink:
                             self.decklink.put_video_frame(
                                 frame_data,
                                 frame.width,
-                                frame.height
+                                frame.height,
+                                anc_packets=self._caption_packets(frame),
                             )
 
                         self._frame_count += 1
@@ -153,6 +154,40 @@ class DeckLinkPlayout:
         finally:
             self.is_running = False
             logger.info("Playout thread ended")
+
+    def _caption_packets(self, frame: Frame):
+        """One CDP per output frame while captions are enabled, else None (no VANC output).
+
+        Returns a list (possibly empty) when enabled so the output is started with VANC on.
+        Subtitle changes (frame.subtitle, set by the overlay) become pop-on show/clear.
+        """
+        if not getattr(_config, 'CAPTIONS_ENABLED', False):
+            return None
+        try:
+            from .captions import CaptionInserter
+            from .captions.vanc import AncPacket
+            rate = frame.framerate
+            if not rate or not rate[0] or not rate[1]:
+                return []
+            if getattr(self, '_cc_rate', None) != tuple(rate):
+                self._cc = CaptionInserter(rate[0], rate[1],
+                                           enable_608=getattr(_config, 'CAPTIONS_608', True),
+                                           enable_708=getattr(_config, 'CAPTIONS_708', True))
+                self._cc_rate, self._cc_text = tuple(rate), None
+                logger.info(f"Closed captions on: {rate[0]}/{rate[1]} fps, "
+                            f"608={self._cc.enable_608} 708={self._cc.enable_708}, "
+                            f"VANC line {getattr(_config, 'CAPTION_VANC_LINE', 9)}")
+            text = frame.subtitle
+            if text is not None and text != self._cc_text:
+                lines = [l for l in text.split('\n') if l.strip()]
+                self._cc.show(lines) if lines else self._cc.clear()
+                self._cc_text = text
+            return [AncPacket(self._cc.next_cdp(), line=getattr(_config, 'CAPTION_VANC_LINE', 9))]
+        except Exception as e:
+            if not getattr(self, '_cc_error_logged', False):
+                logger.error(f"Closed captions failed (video continues without): {e}", exc_info=True)
+                self._cc_error_logged = True
+            return []
 
     def _convert_to_decklink_format(self, frame: Frame) -> bytes:
         """

@@ -70,6 +70,7 @@ class TextOverlay:
         if self.frame_count % self.check_interval == 0:
             self._update_text()
         self.frame_count += 1
+        frame.subtitle = self.current_text or ""
 
         if not self.current_text:
             return frame

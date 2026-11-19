@@ -30,6 +30,9 @@ class Frame:
     # blended into it and playout sends it unchanged; `data` (RGB) is then only derived on demand
     # for the GUI / encoding outputs via ensure_rgb().
     uyvy: Optional[np.ndarray] = None
+    # Subtitle text shown on this frame (set by the overlay; "" = none, None = overlay not run).
+    # Playout turns changes into closed captions, so burned-in text and captions always match.
+    subtitle: Optional[str] = None
 
     def ensure_rgb(self) -> np.ndarray:
         """Fill `data` (RGB24) from `uyvy` if it is not there yet (BT.601 limited range, like PyAV)."""
