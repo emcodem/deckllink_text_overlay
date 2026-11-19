@@ -157,6 +157,59 @@ def _create_input_callback(frame_callback=None, audio_callback=None, audio_chann
                     # given us a verified framerate from the actual signal.
                     return 0
 
+                # Audio first, so the frame can carry the audio that arrived with it (A/V pairing
+                # for scheduled playout); the audio queue (outputs, GUI preview) is fed as before.
+                paired_audio = None
+                if audioPacket and audio_callback:
+                    try:
+                        sample_count = audioPacket.GetSampleFrameCount()
+                        # GetBytes() returns a raw buffer pointer (single int address),
+                        # not a tuple — mirror the video path's ctypes.from_address pattern.
+                        buffer_ptr = audioPacket.GetBytes()
+
+                        # Audio stream-time timestamp — same clock domain as video GetStreamTime,
+                        # resets to 0 on each StartStreams(). packet_time=0 is valid (first packet).
+                        audio_hw_pts = 0
+                        audio_hw_pts_valid = False
+                        try:
+                            raw_pkt = audioPacket.GetPacketTime(TIMESCALE)
+                            if isinstance(raw_pkt, (tuple, list)):
+                                audio_hw_pts = int(raw_pkt[0])
+                            else:
+                                audio_hw_pts = int(raw_pkt)
+                            audio_hw_pts_valid = True
+                        except Exception as e:
+                            _audio_hw_pts_fail[0] += 1
+                            count = _audio_hw_pts_fail[0]
+                            if count in (1, 10, 100, 1000) or (count > 1000 and count % 1000 == 0):
+                                level = logging.ERROR if count >= 1000 else logging.WARNING
+                                logger.log(level,
+                                    f"[av_sync_warn] GetPacketTime failed (#{count}): {e}"
+                                )
+
+                        if _diag_audio[0] < 20:
+                            _diag_audio[0] += 1
+                            logger.info(
+                                f"[pts_diag] audio packet #{_diag_audio[0]}: "
+                                f"packet_time={audio_hw_pts} valid={audio_hw_pts_valid}"
+                            )
+
+                        if buffer_ptr and sample_count > 0:
+                            data_size = sample_count * audio_channels * 2  # int16 samples
+                            raw = (ctypes.c_uint8 * data_size).from_address(buffer_ptr)
+                            audio_bytes = bytes(raw)
+                            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).copy()
+
+                            try:
+                                audio_array = audio_array.reshape(-1, audio_channels)
+                                paired_audio = audio_array
+                                audio_callback(audio_array, 48000, audio_channels, 0,
+                                               audio_hw_pts, TIMESCALE, audio_hw_pts_valid)
+                            except ValueError as e:
+                                logger.warning(f"Audio reshape error: expected {sample_count * audio_channels} samples, got {len(audio_array)}: {e}")
+                    except Exception as e:
+                        logger.error(f"Error processing audio packet: {e}", exc_info=True)
+
                 if videoFrame and frame_callback:
                     try:
                         width = videoFrame.GetWidth()
@@ -218,58 +271,9 @@ def _create_input_callback(frame_callback=None, audio_callback=None, audio_chann
                         if frame_bytes is not None:
 
                             frame_callback(frame_bytes, width, height, pixel_format, _framerate[0], 0, row_bytes,
-                                           video_hw_pts, TIMESCALE, video_hw_pts_valid)
+                                           video_hw_pts, TIMESCALE, video_hw_pts_valid, audio=paired_audio)
                     except Exception as e:
                         logger.error(f"Error processing video frame: {e}")
-
-                if audioPacket and audio_callback:
-                    try:
-                        sample_count = audioPacket.GetSampleFrameCount()
-                        # GetBytes() returns a raw buffer pointer (single int address),
-                        # not a tuple — mirror the video path's ctypes.from_address pattern.
-                        buffer_ptr = audioPacket.GetBytes()
-
-                        # Audio stream-time timestamp — same clock domain as video GetStreamTime,
-                        # resets to 0 on each StartStreams(). packet_time=0 is valid (first packet).
-                        audio_hw_pts = 0
-                        audio_hw_pts_valid = False
-                        try:
-                            raw_pkt = audioPacket.GetPacketTime(TIMESCALE)
-                            if isinstance(raw_pkt, (tuple, list)):
-                                audio_hw_pts = int(raw_pkt[0])
-                            else:
-                                audio_hw_pts = int(raw_pkt)
-                            audio_hw_pts_valid = True
-                        except Exception as e:
-                            _audio_hw_pts_fail[0] += 1
-                            count = _audio_hw_pts_fail[0]
-                            if count in (1, 10, 100, 1000) or (count > 1000 and count % 1000 == 0):
-                                level = logging.ERROR if count >= 1000 else logging.WARNING
-                                logger.log(level,
-                                    f"[av_sync_warn] GetPacketTime failed (#{count}): {e}"
-                                )
-
-                        if _diag_audio[0] < 20:
-                            _diag_audio[0] += 1
-                            logger.info(
-                                f"[pts_diag] audio packet #{_diag_audio[0]}: "
-                                f"packet_time={audio_hw_pts} valid={audio_hw_pts_valid}"
-                            )
-
-                        if buffer_ptr and sample_count > 0:
-                            data_size = sample_count * audio_channels * 2  # int16 samples
-                            raw = (ctypes.c_uint8 * data_size).from_address(buffer_ptr)
-                            audio_bytes = bytes(raw)
-                            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).copy()
-
-                            try:
-                                audio_array = audio_array.reshape(-1, audio_channels)
-                                audio_callback(audio_array, 48000, audio_channels, 0,
-                                               audio_hw_pts, TIMESCALE, audio_hw_pts_valid)
-                            except ValueError as e:
-                                logger.warning(f"Audio reshape error: expected {sample_count * audio_channels} samples, got {len(audio_array)}: {e}")
-                    except Exception as e:
-                        logger.error(f"Error processing audio packet: {e}", exc_info=True)
 
             except Exception as e:
                 logger.error(f"Error in VideoInputFrameArrived: {e}")
@@ -541,6 +545,27 @@ class DeckLinkCOM:
         except Exception as e:
             logger.error(f"Error putting video frame: {e}")
             return False
+
+    def create_filled_frame(self, frame_data: bytes, width: int, height: int):
+        """New output frame (8-bit UYVY) filled with frame_data; for scheduled playback."""
+        row_bytes = width * 2
+        frame = self.decklink_output.CreateVideoFrame(width, height, row_bytes,
+                                                      decklink_module.bmdFormat8BitYUV,
+                                                      decklink_module.bmdFrameFlagDefault)
+        if not frame:
+            raise RuntimeError("CreateVideoFrame returned null")
+        n = min(len(frame_data), row_bytes * height)
+        if not hasattr(decklink_module, "IDeckLinkVideoBuffer"):
+            ptr = frame.GetBytes()               # SDK < Desktop Video 14.3
+            ctypes.memmove(ptr, frame_data, n)
+        else:
+            buf = frame.QueryInterface(decklink_module.IDeckLinkVideoBuffer)
+            buf.StartAccess(decklink_module.bmdBufferAccessWrite)
+            try:
+                ctypes.memmove(buf.GetBytes(), frame_data, n)
+            finally:
+                buf.EndAccess(decklink_module.bmdBufferAccessWrite)
+        return frame
 
     def get_audio_buffered(self) -> int:
         """Audio sample frames waiting in the output buffer (= audio latency in samples), -1 if unknown."""

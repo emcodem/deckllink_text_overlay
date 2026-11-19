@@ -56,12 +56,14 @@ class DeckLinkPlayout:
             self.decklink = DeckLinkCOM(self.device_index, _config.PLAYOUT_DISPLAY_MODE)
             logger.info(f"Using {self.decklink.get_device_name()} for playout")
 
-            # Start playout thread
+            # Start playout thread: A/V-locked scheduled playback (default) or the old sync output
             self.is_running = True
             self._start_time = time.time()
-            self.playout_thread = threading.Thread(target=self._playout_loop, daemon=True)
+            self._scheduled = getattr(_config, 'PLAYOUT_MODE', 'scheduled') == 'scheduled'
+            target = self._scheduled_loop if self._scheduled else self._playout_loop
+            self.playout_thread = threading.Thread(target=target, daemon=True)
             self.playout_thread.start()
-            logger.info("DeckLink playout started")
+            logger.info(f"DeckLink playout started ({'scheduled, A/V locked' if self._scheduled else 'sync'})")
 
         except Exception as e:
             logger.error(f"Failed to start DeckLink playout: {e}", exc_info=True)
@@ -99,6 +101,8 @@ class DeckLinkPlayout:
         Args:
             audio: AudioSample to output
         """
+        if getattr(self, '_scheduled', False):
+            return          # scheduled mode: each frame carries its own audio (Frame.audio)
         try:
             self.audio_queue.put(audio, block=False)
         except queue.Full:
@@ -106,8 +110,57 @@ class DeckLinkPlayout:
             if self._dropped_audio % 25 == 1:
                 logger.warning(f"Playout audio queue full, dropped {self._dropped_audio} audio packets")
 
+    def _prepare_scheduled(self, frame: Frame):
+        """(video bytes, audio for this frame, caption packets) for the scheduler."""
+        audio = frame.audio if getattr(_config, 'AUDIO_PLAYOUT', True) else None
+        return self._convert_to_decklink_format(frame), audio, self._caption_packets(frame)
+
+    def _scheduled_loop(self):
+        """A/V-locked output: frame + its own audio on one card timeline (see scheduled_output)."""
+        from .scheduled_output import ScheduledOutput
+        sched = None
+        try:
+            logger.info("Playout thread started (scheduled)")
+            first = None
+            while self.is_running and first is None:
+                try:
+                    f = self.frame_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if f.framerate and f.framerate[0] and f.framerate[1]:
+                    first = f
+            if first is None:
+                return
+            channels = first.audio.shape[1] if first.audio is not None and first.audio.ndim == 2 \
+                else getattr(_config, 'AUDIO_CHANNELS', 8)
+            sched = ScheduledOutput(self.decklink, first.framerate[0], first.framerate[1],
+                                    first.width, first.height, audio_channels=channels,
+                                    preroll=getattr(_config, 'PLAYOUT_PREROLL_FRAMES', 3))
+            self._sched = sched
+            sched.start(vanc=True)
+            sched.schedule(*self._prepare_scheduled(first))
+            self._frame_count = 1
+
+            def prepare(frame):
+                self._frame_count += 1
+                if self._frame_count % 250 == 0:
+                    st = sched.stats
+                    logger.info(f"[playout_sync] scheduled {st['scheduled']}, buffered {sched.buffered}, "
+                                f"input dropped {st['dropped_input']}, repeated {st['repeated']}, "
+                                f"late {st['late']}, output dropped {st['dropped_output']}")
+                return self._prepare_scheduled(frame)
+
+            sched.run(self.frame_queue, lambda: self.is_running, prepare)
+        except Exception as e:
+            logger.error(f"Scheduled playout error: {e}", exc_info=True)
+        finally:
+            if sched is not None:
+                sched.stop()
+            self.is_running = False
+            logger.info("Playout thread ended")
+
     def _playout_loop(self):
-        """Main playout thread loop."""
+        """Main playout thread loop (sync mode: DisplayVideoFrameSync + WriteAudioSamplesSync)."""
         try:
             logger.info("Playout thread started")
 

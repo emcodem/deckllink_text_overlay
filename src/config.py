@@ -80,6 +80,14 @@ SKIP_GUI = False                    # Skip GUI window (headless mode) - set True
 SKIP_OVERLAY = False               # Skip text overlay - set False to enable
 BENCHMARK_FRAME_PROCESSING = False # Print frame processing times
 
+# SDI playout mode:
+#   "scheduled" (default): frame synchronizer - each frame goes out together with the audio that
+#       arrived with it, on one card timeline, so audio and video cannot drift apart. Input/output
+#       clock differences are absorbed by repeating or dropping whole frames (video + audio together).
+#   "sync": old path (DisplayVideoFrameSync + WriteAudioSamplesSync), audio and video independent.
+PLAYOUT_MODE = "scheduled"
+PLAYOUT_PREROLL_FRAMES = 3         # frames buffered on the card (latency vs. robustness against stalls)
+
 # Embed the captured audio (all AUDIO_CHANNELS, 48 kHz 16-bit) in the SDI playout.
 AUDIO_PLAYOUT = True              # measured on KI-UT5 1080i50: audio ~50 ms later than video at SDI out
 

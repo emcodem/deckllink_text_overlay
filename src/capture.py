@@ -33,6 +33,8 @@ class Frame:
     # Subtitle text shown on this frame (set by the overlay; "" = none, None = overlay not run).
     # Playout turns changes into closed captions, so burned-in text and captions always match.
     subtitle: Optional[str] = None
+    # Audio that arrived with this frame (int16, samples x channels), for A/V-locked playout.
+    audio: Optional[np.ndarray] = None
 
     def ensure_rgb(self) -> np.ndarray:
         """Fill `data` (RGB24) from `uyvy` if it is not there yet (BT.601 limited range, like PyAV)."""
@@ -146,8 +148,9 @@ class DeckLinkCapture:
 
     def _on_frame(self, frame_data: bytes, width: int, height: int, pixel_format: int,
                  framerate: Tuple[int, int], flags: int, row_bytes: int = None,
-                 hw_pts: int = 0, hw_pts_rate: int = 10_000_000, hw_pts_valid: bool = None):
-        """Called when a new frame arrives from DeckLink."""
+                 hw_pts: int = 0, hw_pts_rate: int = 10_000_000, hw_pts_valid: bool = None,
+                 audio: Optional[np.ndarray] = None):
+        """Called when a new frame arrives from DeckLink (audio = the packet that came with it)."""
         try:
             if self._frame_count == 0:
                 from .decklink_com import BMDPixelFormat
@@ -180,6 +183,7 @@ class DeckLinkCapture:
 
             frame = Frame(
                 uyvy=uyvy,
+                audio=audio,
                 data=frame_array,
                 format='UYVY' if uyvy is not None else self._get_format_name(pixel_format),
                 width=width,
