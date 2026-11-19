@@ -20,6 +20,10 @@ except Exception as e:
     decklink_module = None
 
 
+# device index -> display name, filled when a device is opened (shown in the GUI)
+DEVICE_NAMES = {}
+
+
 # Create a simple namespace for pixel format constants for backward compatibility
 class BMDPixelFormat:
     """Pixel format constants."""
@@ -333,16 +337,20 @@ class DeckLinkCOM:
             raise
 
     def get_device_name(self) -> str:
-        """Get display name of the device."""
-        if not self.decklink_input:
-            return "Unknown"
-        try:
-            # The input interface should have GetDisplayName or similar
-            # Try to get the name through the interface
-            name = self.decklink_input.GetDisplayName()
-            return name if name else "DeckLink Device"
-        except:
-            return "DeckLink Device"
+        """Display name of the device, e.g. 'DeckLink Quad (7)' (also recorded in DEVICE_NAMES)."""
+        name = None
+        for iface in (self.decklink_input, self.decklink_output):
+            if iface is None:
+                continue
+            try:
+                # GetDisplayName lives on IDeckLink, not on the input/output interfaces
+                name = iface.QueryInterface(decklink_module.IDeckLink).GetDisplayName()
+                break
+            except Exception:
+                continue
+        name = name or "DeckLink Device"
+        DEVICE_NAMES[self.device_index] = name
+        return name
 
     def set_callback(self, callback_obj):
         """Store callback object for later use in start_streams().

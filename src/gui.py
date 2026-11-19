@@ -557,9 +557,14 @@ class GUIDisplay(QMainWindow):
         self._cc_timer.timeout.connect(self._update_caption_status)
         self._cc_timer.start(500)
 
-        # Status bar
+        # Status bar (+ selected DeckLink devices, small, right-aligned)
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+        self._lbl_dev = QLabel("")
+        self._lbl_dev.setStyleSheet("color: gray; font-size: 8pt;")
+        self._lbl_dev.setToolTip("CAPTURE_DEVICE_INDEX / PLAYOUT_DEVICE_INDEX in config.py (0 = first channel)")
+        self.status_bar.addPermanentWidget(self._lbl_dev)
+        self._update_device_label()
         self._update_status()
 
     # ------------------------------------------------------------------
@@ -658,9 +663,27 @@ class GUIDisplay(QMainWindow):
             logger.error("Failed to save caption settings to %s: %s", path, e)
             self.status_bar.showMessage(f"Saving caption settings failed: {e}", 8000)
 
+    def _update_device_label(self):
+        from . import config
+        try:
+            from .decklink_com import DEVICE_NAMES
+        except Exception:
+            DEVICE_NAMES = {}
+
+        def dev(idx):
+            name = DEVICE_NAMES.get(idx)
+            return f"#{idx} {name}" if name else f"#{idx}"
+        if getattr(config, 'SIMULATE_HARDWARE', False):
+            inp = "file"
+        else:
+            inp = dev(config.CAPTURE_DEVICE_INDEX)
+        out = "off" if getattr(config, 'SKIP_PLAYOUT', True) else dev(config.PLAYOUT_DEVICE_INDEX)
+        self._lbl_dev.setText(f"In {inp} · Out {out}")
+
     def _update_caption_status(self):
         from . import config
         from .captions import state as cc_state
+        self._update_device_label()
         st = cc_state.get()
         if getattr(config, 'SKIP_PLAYOUT', True):
             text, color = "inactive: SDI playout is off (SKIP_PLAYOUT = True)", "gray"
