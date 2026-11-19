@@ -317,8 +317,11 @@ class RealDeckLinkCapture(DeckLinkCapture):
         try:
             from .decklink_com import DeckLinkCOM, DeckLinkInputCallback
 
-            # Initialize DeckLink device
-            self.decklink = DeckLinkCOM(self.device_index)
+            # Initialize DeckLink device in the configured mode (previously always 1080i50).
+            # Desktop Video 16 only reports a format change (which starts frame processing) when this
+            # differs from the real input, so a deliberately "wrong" mode such as 720p50 can be needed.
+            from . import config as _config
+            self.decklink = DeckLinkCOM(self.device_index, _config.CAPTURE_DISPLAY_MODE)
             logger.info(f"Using {self.decklink.get_device_name()}")
 
             # Create callback handler

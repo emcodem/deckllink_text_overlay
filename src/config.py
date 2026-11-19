@@ -79,3 +79,14 @@ SKIP_PLAYOUT = True               # Skip sending frames to playout device (False
 SKIP_GUI = False                    # Skip GUI window (headless mode) - set True for hardware test
 SKIP_OVERLAY = False               # Skip text overlay - set False to enable
 BENCHMARK_FRAME_PROCESSING = False # Print frame processing times
+
+# Playout colour handling (tested on SDI 2026-11-17)
+FIX_PLAYOUT_COLORS = True          # Fix red/blue swap on SDI playout (False = original behaviour)
+PLAYOUT_BROADCAST_RANGE = True     # SDI output in BT.601 limited range 16-235 (False = old full-range conversion)
+
+# When running as a compiled exe, load overrides from config.py next to the exe
+# (site settings such as CAPTURE_DISPLAY_MODE, SKIP_PLAYOUT, OUTPUTS), same as config_subtitles.py.
+if getattr(sys, 'frozen', False):
+    _external = Path(sys.executable).parent / "config.py"
+    if _external.exists():
+        exec(compile(_external.read_text(encoding="utf-8-sig"), str(_external), "exec"), globals())

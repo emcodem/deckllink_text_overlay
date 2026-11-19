@@ -9,8 +9,22 @@ import numpy as np
 import cv2
 
 from .capture import Frame, AudioSample
+from . import config as _config
 
 logger = logging.getLogger(__name__)
+
+# BT.601 limited-range RGB -> YCbCr (Y 16-235, Cb/Cr 16-240), the exact inverse of the
+# capture-side PyAV conversion. 3x4 matrix for cv2.transform (last column = offset).
+_KR, _KB = 0.299, 0.114
+_KG = 1.0 - _KR - _KB
+_RGB_TO_YCC_601_LIMITED = np.hstack([
+    np.array([
+        [_KR, _KG, _KB],
+        [-_KR / (2 * (1 - _KB)), -_KG / (2 * (1 - _KB)), 0.5],
+        [0.5, -_KG / (2 * (1 - _KR)), -_KB / (2 * (1 - _KR))],
+    ], np.float32) * np.array([219 / 255, 224 / 255, 224 / 255], np.float32)[:, None],
+    np.array([[16], [128], [128]], np.float32),
+])
 
 
 class DeckLinkPlayout:
@@ -165,12 +179,25 @@ class DeckLinkPlayout:
             frame_data = frame.data
             h, w = frame_data.shape[:2]
 
+            # Hardware capture delivers RGB pixels but labels the frame with the BMD format name
+            # (e.g. 'bmdFormat8BitYUV'). Treating those as BGR swaps red and blue on SDI out.
+            fmt = frame.format
+            if fmt not in ('RGB24', 'BGR24', 'YUV420P') and getattr(_config, 'FIX_PLAYOUT_COLORS', True):
+                fmt = 'RGB24'
+
+            if getattr(_config, 'PLAYOUT_BROADCAST_RANGE', True):
+                try:
+                    return self._to_uyvy_broadcast_range(frame_data, fmt)
+                except Exception as e:
+                    logger.debug(f"Broadcast-range conversion failed, using legacy path: {e}")
+
+            # Legacy path: full-range cv2 conversion, no chroma filtering
             # Convert to BGR if needed (OpenCV standard)
-            if frame.format == 'RGB24':
+            if fmt == 'RGB24':
                 bgr = cv2.cvtColor(frame_data, cv2.COLOR_RGB2BGR)
-            elif frame.format == 'BGR24':
+            elif fmt == 'BGR24':
                 bgr = frame_data
-            elif frame.format == 'YUV420P':
+            elif fmt == 'YUV420P':
                 bgr = cv2.cvtColor(frame_data, cv2.COLOR_YUV2BGR_I420)
             else:
                 bgr = frame_data
@@ -195,3 +222,27 @@ class DeckLinkPlayout:
             logger.error(f"Error converting frame to UYVY: {e}")
             # Return dummy data
             return bytes(frame.width * frame.height * 2)
+
+    @staticmethod
+    def _to_uyvy_broadcast_range(frame_data: np.ndarray, fmt: str) -> bytes:
+        """RGB/BGR/YUV420P -> UYVY in BT.601 limited range, chroma averaged per pixel pair.
+
+        Replaces the full-range cv2 BGR2YUV conversion, which produced illegal SDI levels
+        (clipped whites, hard text edges).
+        """
+        if fmt == 'BGR24':
+            rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+        elif fmt == 'YUV420P':
+            rgb = cv2.cvtColor(frame_data, cv2.COLOR_YUV2RGB_I420)
+        else:
+            rgb = frame_data
+        rgb = np.ascontiguousarray(rgb, dtype=np.uint8)
+        h, w = rgb.shape[:2]
+        ycc = cv2.transform(rgb, _RGB_TO_YCC_601_LIMITED)
+        uyvy = np.empty((h, w * 2), np.uint8)
+        uyvy[:, 1::2] = ycc[:, :, 0]
+        chroma = ycc[:, :, 1:].astype(np.uint16)
+        chroma = ((chroma[:, 0::2] + chroma[:, 1::2] + 1) >> 1).astype(np.uint8)
+        uyvy[:, 0::4] = chroma[:, :, 0]
+        uyvy[:, 2::4] = chroma[:, :, 1]
+        return uyvy.tobytes()
