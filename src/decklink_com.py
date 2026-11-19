@@ -189,14 +189,28 @@ def _create_input_callback(frame_callback=None, audio_callback=None, audio_chann
                                 f"valid={video_hw_pts_valid}"
                             )
 
-                        # Get the frame buffer directly via IDeckLinkVideoFrame.GetBytes()
-                        buffer_ptr = videoFrame.GetBytes()
+                        # Frame buffer: older SDKs expose IDeckLinkVideoFrame.GetBytes(); Desktop Video 14.3+
+                        # moved it to IDeckLinkVideoBuffer (StartAccess/GetBytes/EndAccess).
+                        video_buffer = None
+                        if hasattr(decklink_module, "IDeckLinkVideoBuffer"):
+                            video_buffer = videoFrame.QueryInterface(decklink_module.IDeckLinkVideoBuffer)
+                            video_buffer.StartAccess(decklink_module.bmdBufferAccessRead)
+                            buffer_ptr = video_buffer.GetBytes()
+                        else:
+                            buffer_ptr = videoFrame.GetBytes()
 
-                        if buffer_ptr:
-                            # Copy frame data to bytes
-                            data_size = height * row_bytes
-                            frame_data = (ctypes.c_uint8 * data_size).from_address(buffer_ptr)
-                            frame_bytes = bytes(frame_data)
+                        frame_bytes = None
+                        try:
+                            if buffer_ptr:
+                                # Copy frame data to bytes
+                                data_size = height * row_bytes
+                                frame_data = (ctypes.c_uint8 * data_size).from_address(buffer_ptr)
+                                frame_bytes = bytes(frame_data)
+                        finally:
+                            if video_buffer is not None:
+                                video_buffer.EndAccess(decklink_module.bmdBufferAccessRead)
+
+                        if frame_bytes is not None:
 
                             frame_callback(frame_bytes, width, height, pixel_format, _framerate[0], 0, row_bytes,
                                            video_hw_pts, TIMESCALE, video_hw_pts_valid)
@@ -460,29 +474,37 @@ class DeckLinkCOM:
 
             # Access frame buffer and copy data
             try:
-                video_buffer = mutable_frame.QueryInterface(decklink_module.IDeckLinkVideoBuffer)
+                if not hasattr(decklink_module, "IDeckLinkVideoBuffer"):
+                    # Older SDKs (< Desktop Video 14.3): the frame exposes GetBytes() directly
+                    buffer_ptr = mutable_frame.GetBytes()
+                    if not buffer_ptr:
+                        logger.warning("GetBytes returned null pointer")
+                        return False
+                    ctypes.memmove(buffer_ptr, frame_data, len(frame_data))
+                else:
+                    video_buffer = mutable_frame.QueryInterface(decklink_module.IDeckLinkVideoBuffer)
 
-                # Start access for writing
-                hr = video_buffer.StartAccess(decklink_module.bmdBufferAccessWrite)
-                if hr != 0:
-                    logger.warning(f"StartAccess failed: {hr}")
-                    return False
+                    # Start access for writing
+                    hr = video_buffer.StartAccess(decklink_module.bmdBufferAccessWrite)
+                    if hr != 0:
+                        logger.warning(f"StartAccess failed: {hr}")
+                        return False
 
-                # Get buffer pointer
-                buffer_ptr = video_buffer.GetBytes()
-                if not buffer_ptr:
-                    logger.warning("GetBytes returned null pointer")
-                    return False
+                    # Get buffer pointer
+                    buffer_ptr = video_buffer.GetBytes()
+                    if not buffer_ptr:
+                        logger.warning("GetBytes returned null pointer")
+                        return False
 
-                # Copy frame data
-                ctypes.memmove(buffer_ptr, frame_data, len(frame_data))
-                logger.debug(f"Copied {len(frame_data)} bytes to frame buffer")
+                    # Copy frame data
+                    ctypes.memmove(buffer_ptr, frame_data, len(frame_data))
+                    logger.debug(f"Copied {len(frame_data)} bytes to frame buffer")
 
-                # End access
-                hr = video_buffer.EndAccess(decklink_module.bmdBufferAccessWrite)
-                if hr != 0:
-                    logger.warning(f"EndAccess failed: {hr}")
-                    return False
+                    # End access
+                    hr = video_buffer.EndAccess(decklink_module.bmdBufferAccessWrite)
+                    if hr != 0:
+                        logger.warning(f"EndAccess failed: {hr}")
+                        return False
 
             except Exception as e:
                 logger.error(f"Error accessing frame buffer: {e}")
