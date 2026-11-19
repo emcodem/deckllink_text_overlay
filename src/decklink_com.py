@@ -429,13 +429,14 @@ class DeckLinkCOM:
         except Exception as e:
             logger.error(f"Error stopping streams: {e}")
 
-    def put_video_frame(self, frame_data: bytes, width: int, height: int) -> bool:
+    def put_video_frame(self, frame_data: bytes, width: int, height: int, anc_packets=None) -> bool:
         """Send a video frame to the output.
 
         Args:
             frame_data: Raw frame bytes in UYVY format
             width: Frame width in pixels
             height: Frame height in pixels
+            anc_packets: optional list of captions.vanc.AncPacket to insert into this frame's VANC
 
         Returns:
             True if successful
@@ -445,17 +446,18 @@ class DeckLinkCOM:
             return False
 
         try:
-            # Enable output on first frame
+            # Enable output on first frame. Ancillary packets attached to frames are silently dropped
+            # unless output is enabled with bmdVideoOutputVANC (verified with Desktop Video 16), so
+            # callers that will insert VANC pass anc_packets (possibly empty) from the first frame on.
             if not self._output_started:
-                hr = self.decklink_output.EnableVideoOutput(
-                    self.display_mode,
-                    decklink_module.bmdVideoOutputFlagDefault
-                )
+                flags = (decklink_module.bmdVideoOutputVANC if anc_packets is not None
+                         else decklink_module.bmdVideoOutputFlagDefault)
+                hr = self.decklink_output.EnableVideoOutput(self.display_mode, flags)
                 if hr != 0:
                     logger.warning(f"EnableVideoOutput failed: {hr}")
                     return False
                 self._output_started = True
-                logger.debug("Video output enabled")
+                logger.debug(f"Video output enabled (VANC={'on' if anc_packets is not None else 'off'})")
 
             # Create frame (auto-generated method returns frame directly)
             row_bytes = width * 2  # UYVY is 2 bytes per pixel
@@ -509,6 +511,15 @@ class DeckLinkCOM:
             except Exception as e:
                 logger.error(f"Error accessing frame buffer: {e}")
                 return False
+
+            if anc_packets:
+                try:
+                    from .captions.vanc import attach_packets
+                    attach_packets(mutable_frame, anc_packets)
+                except Exception as e:
+                    if not getattr(self, "_anc_error_logged", False):
+                        logger.error(f"Attaching VANC packets failed (video continues without): {e}")
+                        self._anc_error_logged = True
 
             # Display frame
             hr = self.decklink_output.DisplayVideoFrameSync(mutable_frame)
