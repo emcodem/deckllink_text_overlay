@@ -161,8 +161,18 @@ class DeckLinkPlayout:
         Returns a list (possibly empty) when enabled so the output is started with VANC on.
         Subtitle changes (frame.subtitle, set by the overlay) become pop-on show/clear.
         """
-        if not getattr(_config, 'CAPTIONS_ENABLED', False):
+        if not getattr(_config, 'CAPTIONS_ENABLED', True):
             return None
+        want608 = bool(getattr(_config, 'CAPTIONS_608', True))
+        want708 = bool(getattr(_config, 'CAPTIONS_708', True))
+        if not (want608 or want708):
+            return None
+        line = getattr(_config, 'CAPTION_VANC_LINE', 9)
+        if not isinstance(line, int) or not 1 <= line <= 1125:
+            if not getattr(self, '_cc_line_warned', False):
+                logger.error(f"CAPTION_VANC_LINE={line!r} is not a valid line number, using 9")
+                self._cc_line_warned = True
+            line = 9
         try:
             from .captions import CaptionInserter
             from .captions.vanc import AncPacket
@@ -170,19 +180,16 @@ class DeckLinkPlayout:
             if not rate or not rate[0] or not rate[1]:
                 return []
             if getattr(self, '_cc_rate', None) != tuple(rate):
-                self._cc = CaptionInserter(rate[0], rate[1],
-                                           enable_608=getattr(_config, 'CAPTIONS_608', True),
-                                           enable_708=getattr(_config, 'CAPTIONS_708', True))
+                self._cc = CaptionInserter(rate[0], rate[1], enable_608=want608, enable_708=want708)
                 self._cc_rate, self._cc_text = tuple(rate), None
                 logger.info(f"Closed captions on: {rate[0]}/{rate[1]} fps, "
-                            f"608={self._cc.enable_608} 708={self._cc.enable_708}, "
-                            f"VANC line {getattr(_config, 'CAPTION_VANC_LINE', 9)}")
+                            f"608={want608} 708={want708}, VANC line {line}")
             text = frame.subtitle
             if text is not None and text != self._cc_text:
                 lines = [l for l in text.split('\n') if l.strip()]
                 self._cc.show(lines) if lines else self._cc.clear()
                 self._cc_text = text
-            return [AncPacket(self._cc.next_cdp(), line=getattr(_config, 'CAPTION_VANC_LINE', 9))]
+            return [AncPacket(self._cc.next_cdp(), line=line)]
         except Exception as e:
             if not getattr(self, '_cc_error_logged', False):
                 logger.error(f"Closed captions failed (video continues without): {e}", exc_info=True)

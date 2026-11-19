@@ -87,10 +87,12 @@ VIDEO_PASSTHROUGH = True
 
 # Closed captions on the SDI playout (CEA-608 CC1 + CTA-708 service 1, pop-on, in SMPTE 334 CDPs).
 # Text = the subtitle the overlay shows (same text file). Verified on DeckLink Quad / Desktop Video 16.
-CAPTIONS_ENABLED = False           # Insert captions into the playout VANC
-CAPTIONS_608 = True                # CEA-608 (needs ~1-2.5 s to load a caption, see TODO)
-CAPTIONS_708 = True                # CTA-708 (visible after 1-2 frames)
-CAPTION_VANC_LINE = 9              # VANC line for the CDP packet (DID 0x61 / SDID 0x01)
+# Only active when playout is on (SKIP_PLAYOUT = False). Set 608/708 independently:
+# both True = 608 + 708 (default), one False = only the other, both False = no captions.
+CAPTIONS_ENABLED = True            # Master switch: insert captions into the playout VANC
+CAPTIONS_608 = True                # CEA-608 CC1 (a pop-on caption needs ~1-2.5 s to load; accepted)
+CAPTIONS_708 = True                # CTA-708 service 1 (visible after 1-2 frames)
+CAPTION_VANC_LINE = 9              # VANC line for the CDP packet (DID 0x61 / SDID 0x01), default 9
 
 # Playout colour handling for RGB sources (old path / simulation; tested on SDI 2026-11-17)
 FIX_PLAYOUT_COLORS = True          # Fix red/blue swap on SDI playout (False = original behaviour)
