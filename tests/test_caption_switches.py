@@ -78,8 +78,50 @@ def test_only_708():
 
 
 def test_off():
-    assert all(x is None for x in _run(c608=False, c708=False))
-    assert all(x is None for x in _run(enabled=False))
+    # off = no packets, but still a list so the output keeps VANC enabled for switching back on
+    assert all(x == [] for x in _run(c608=False, c708=False))
+    assert all(x == [] for x in _run(enabled=False))
+
+
+def test_live_switching():
+    config.CAPTIONS_ENABLED, config.CAPTIONS_608, config.CAPTIONS_708, config.CAPTION_VANC_LINE = True, True, True, 9
+    p = DeckLinkPlayout.__new__(DeckLinkPlayout)
+
+    def frame(n):
+        return Frame(data=None, format="UYVY", width=1920, height=1080, framerate=(25000, 1000),
+                     timestamp=n / 25, frame_number=n, subtitle=TEXT)
+    assert len(p._caption_packets(frame(0))) == 1
+    config.CAPTIONS_ENABLED = False
+    assert p._caption_packets(frame(1)) == []
+    config.CAPTIONS_ENABLED, config.CAPTIONS_708 = True, False      # back on, 608 only
+    pk = [p._caption_packets(frame(n)) for n in range(2, 150)]
+    got608, seen708 = _decode(pk)
+    assert not seen708
+    if T.FFMPEG:
+        assert got608 == [TEXT], got608      # current subtitle is re-sent after switching
+
+
+def test_save_only_touches_caption_lines():
+    from src.captions import settings
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "config.py")
+        original = ("CAPTURE_DISPLAY_MODE = 0x68703530   # 720p50 trick\n"
+                    "CAPTIONS_608 = True                # keep this comment\n"
+                    "SKIP_PLAYOUT = False\n")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(original)
+        from pathlib import Path
+        settings.save(Path(path), {"CAPTIONS_ENABLED": True, "CAPTIONS_608": False,
+                                   "CAPTIONS_708": True, "CAPTION_VANC_LINE": 14})
+        text = open(path, encoding="utf-8").read()
+        assert "CAPTURE_DISPLAY_MODE = 0x68703530   # 720p50 trick" in text
+        assert "SKIP_PLAYOUT = False" in text
+        assert "CAPTIONS_608 = False                # keep this comment" in text
+        assert text.count("CAPTIONS_608") == 1
+        assert "CAPTION_VANC_LINE = 14" in text and "CAPTIONS_708 = True" in text
+        ns = {}
+        exec(text, ns)
+        assert (ns["CAPTIONS_608"], ns["CAPTIONS_708"], ns["CAPTION_VANC_LINE"]) == (False, True, 14)
 
 
 def test_vanc_line():

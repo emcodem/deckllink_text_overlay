@@ -551,6 +551,11 @@ class GUIDisplay(QMainWindow):
         ctrl.addWidget(btn_subtitles)
 
         layout.addLayout(ctrl)
+        layout.addWidget(self._build_caption_group())
+
+        self._cc_timer = QTimer()
+        self._cc_timer.timeout.connect(self._update_caption_status)
+        self._cc_timer.start(500)
 
         # Status bar
         self.status_bar = QStatusBar()
@@ -563,6 +568,118 @@ class GUIDisplay(QMainWindow):
         if self._audio_thread is not None:
             playing = (state == Qt.CheckState.Checked.value or state == 2)
             self._audio_thread.set_playing(playing)
+
+    # ------------------------------------------------------------------
+    # Closed captions: switches (live) + status
+    # ------------------------------------------------------------------
+
+    def _build_caption_group(self) -> QGroupBox:
+        from . import config
+        from .captions import settings as cc_settings
+        vals = cc_settings.current(config)
+
+        box = QGroupBox("Closed captions (SDI VANC)")
+        row = QHBoxLayout(box)
+
+        self._chk_cc = QCheckBox("Captions on")
+        self._chk_cc.setChecked(bool(vals["CAPTIONS_ENABLED"]))
+        self._chk_608 = QCheckBox("608")
+        self._chk_608.setChecked(bool(vals["CAPTIONS_608"]))
+        self._chk_608.setToolTip("CEA-608 CC1 pop-on (needs ~1-2.5 s to load a caption)")
+        self._chk_708 = QCheckBox("708")
+        self._chk_708.setChecked(bool(vals["CAPTIONS_708"]))
+        self._chk_708.setToolTip("CTA-708 service 1 pop-on (visible after 1-2 frames)")
+        self._spin_line = QSpinBox()
+        self._spin_line.setRange(1, 1125)
+        line = vals["CAPTION_VANC_LINE"]
+        self._spin_line.setValue(line if isinstance(line, int) and 1 <= line <= 1125 else 9)
+        self._spin_line.setToolTip("VANC line of the CDP packet (DID 0x61 / SDID 0x01), default 9")
+
+        for w in (self._chk_cc, self._chk_608, self._chk_708):
+            w.stateChanged.connect(self._on_caption_changed)
+        self._spin_line.valueChanged.connect(self._on_caption_changed)
+
+        row.addWidget(self._chk_cc)
+        row.addWidget(self._chk_608)
+        row.addWidget(self._chk_708)
+        row.addWidget(QLabel("VANC line"))
+        row.addWidget(self._spin_line)
+
+        self._lbl_cc = QLabel("")
+        self._lbl_cc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        row.addWidget(self._lbl_cc, 1)
+
+        self._btn_cc_save = QPushButton("Save")
+        path = cc_settings.site_config_path()
+        if path is None:
+            self._btn_cc_save.setEnabled(False)
+            self._btn_cc_save.setToolTip("Running from source: edit src/config.py instead")
+        else:
+            self._btn_cc_save.setToolTip(f"Write these 4 settings into {path}")
+        self._btn_cc_save.clicked.connect(self._save_captions)
+        row.addWidget(self._btn_cc_save)
+
+        self._update_caption_enabling()
+        return box
+
+    def _caption_values(self) -> dict:
+        return {
+            "CAPTIONS_ENABLED": self._chk_cc.isChecked(),
+            "CAPTIONS_608": self._chk_608.isChecked(),
+            "CAPTIONS_708": self._chk_708.isChecked(),
+            "CAPTION_VANC_LINE": int(self._spin_line.value()),
+        }
+
+    def _update_caption_enabling(self):
+        on = self._chk_cc.isChecked()
+        for w in (self._chk_608, self._chk_708, self._spin_line):
+            w.setEnabled(on)
+
+    def _on_caption_changed(self, *_):
+        """Apply immediately: playout reads the config on every frame."""
+        from . import config
+        from .captions import settings as cc_settings
+        self._update_caption_enabling()
+        vals = self._caption_values()
+        cc_settings.apply(config, vals)
+        logger.info("Caption settings applied: %s", vals)
+        self._update_caption_status()
+
+    def _save_captions(self):
+        from .captions import settings as cc_settings
+        path = cc_settings.site_config_path()
+        if path is None:
+            return
+        try:
+            cc_settings.save(path, self._caption_values())
+            logger.info("Caption settings saved to %s", path)
+            self.status_bar.showMessage(f"Caption settings saved to {path}", 5000)
+        except Exception as e:
+            logger.error("Failed to save caption settings to %s: %s", path, e)
+            self.status_bar.showMessage(f"Saving caption settings failed: {e}", 8000)
+
+    def _update_caption_status(self):
+        from . import config
+        from .captions import state as cc_state
+        st = cc_state.get()
+        if getattr(config, 'SKIP_PLAYOUT', True):
+            text, color = "inactive: SDI playout is off (SKIP_PLAYOUT = True)", "gray"
+        elif not self._chk_cc.isChecked() or not (self._chk_608.isChecked() or self._chk_708.isChecked()):
+            text, color = "off", "gray"
+        elif st["state"] == "error":
+            text, color = f"ERROR: {st['error']}", "red"
+        elif st["state"] != "active":
+            text, color = f"waiting ({st['reason'] or 'no frames yet'})", "orange"
+        else:
+            kinds = "+".join(k for k, on in (("608", st["c608"]), ("708", st["c708"])) if on)
+            text = f"sending {kinds} on line {st['line']} @ {st['fps']} fps"
+            if st["c608"] and st["backlog608_s"] > 0.05:
+                text += f" · 608 loading {st['backlog608_s']:.1f} s"
+            caption = st["text"]
+            text += f" · {'showing: ' + chr(34) + caption[:60] + chr(34) if caption else 'no caption'}"
+            color = "green"
+        self._lbl_cc.setText(text)
+        self._lbl_cc.setStyleSheet(f"color: {color};")
 
     def _open_subtitle_dialog(self):
         if self._subtitle_dialog is None or not self._subtitle_dialog.isVisible():
@@ -619,6 +736,8 @@ class GUIDisplay(QMainWindow):
     def closeEvent(self, event):
         logger.info("Closing GUI")
         self.update_timer.stop()
+        if getattr(self, "_cc_timer", None) is not None:
+            self._cc_timer.stop()
         if self._audio_thread is not None:
             self._audio_thread.stop()
         if self._subtitle_dialog is not None:

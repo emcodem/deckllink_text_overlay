@@ -156,32 +156,39 @@ class DeckLinkPlayout:
             logger.info("Playout thread ended")
 
     def _caption_packets(self, frame: Frame):
-        """One CDP per output frame while captions are enabled, else None (no VANC output).
+        """Closed-caption ANC packets for this output frame: [] = none, [AncPacket] = one CDP.
 
-        Returns a list (possibly empty) when enabled so the output is started with VANC on.
+        Always returns a list, so the output is started with VANC enabled and captions can be
+        switched on/off/608/708/line at runtime (GUI or config) without restarting playout.
         Subtitle changes (frame.subtitle, set by the overlay) become pop-on show/clear.
         """
-        if not getattr(_config, 'CAPTIONS_ENABLED', True):
-            return None
-        want608 = bool(getattr(_config, 'CAPTIONS_608', True))
-        want708 = bool(getattr(_config, 'CAPTIONS_708', True))
-        if not (want608 or want708):
-            return None
+        from .captions import state as cc_state
+        want = bool(getattr(_config, 'CAPTIONS_ENABLED', True))
+        want608 = want and bool(getattr(_config, 'CAPTIONS_608', True))
+        want708 = want and bool(getattr(_config, 'CAPTIONS_708', True))
         line = getattr(_config, 'CAPTION_VANC_LINE', 9)
-        if not isinstance(line, int) or not 1 <= line <= 1125:
-            if not getattr(self, '_cc_line_warned', False):
+        if not isinstance(line, int) or isinstance(line, bool) or not 1 <= line <= 1125:
+            if getattr(self, '_cc_bad_line', None) != line:
                 logger.error(f"CAPTION_VANC_LINE={line!r} is not a valid line number, using 9")
-                self._cc_line_warned = True
+                self._cc_bad_line = line
             line = 9
+        if not (want608 or want708):
+            if getattr(self, '_cc_key', None) is not None:
+                logger.info("Closed captions off")
+            self._cc_key = None
+            cc_state.update(state="off", reason="switched off", c608=False, c708=False, line=line)
+            return []
+        rate = frame.framerate
+        if not rate or not rate[0] or not rate[1]:
+            cc_state.update(state="idle", reason="waiting for frame rate")
+            return []
         try:
             from .captions import CaptionInserter
             from .captions.vanc import AncPacket
-            rate = frame.framerate
-            if not rate or not rate[0] or not rate[1]:
-                return []
-            if getattr(self, '_cc_rate', None) != tuple(rate):
+            key = (tuple(rate), want608, want708)
+            if getattr(self, '_cc_key', None) != key:
                 self._cc = CaptionInserter(rate[0], rate[1], enable_608=want608, enable_708=want708)
-                self._cc_rate, self._cc_text = tuple(rate), None
+                self._cc_key, self._cc_text, self._cc_frames = key, None, 0
                 logger.info(f"Closed captions on: {rate[0]}/{rate[1]} fps, "
                             f"608={want608} 708={want708}, VANC line {line}")
             text = frame.subtitle
@@ -189,11 +196,20 @@ class DeckLinkPlayout:
                 lines = [l for l in text.split('\n') if l.strip()]
                 self._cc.show(lines) if lines else self._cc.clear()
                 self._cc_text = text
-            return [AncPacket(self._cc.next_cdp(), line=line)]
+            packet = AncPacket(self._cc.next_cdp(), line=line)
+            self._cc_frames += 1
+            if self._cc_frames % 5 == 1:     # status for the GUI, a few times per second
+                fps = rate[0] / rate[1]
+                cc_state.update(state="active", reason="", c608=want608, c708=want708, line=line,
+                                fps=f"{fps:.2f}".rstrip('0').rstrip('.'), frames=self._cc_frames,
+                                backlog608_s=(self._cc.backlog_608_frames / fps) if want608 else 0.0,
+                                text=(self._cc_text or "").replace('\n', ' / '), error="")
+            return [packet]
         except Exception as e:
             if not getattr(self, '_cc_error_logged', False):
                 logger.error(f"Closed captions failed (video continues without): {e}", exc_info=True)
                 self._cc_error_logged = True
+            cc_state.update(state="error", error=str(e)[:200])
             return []
 
     def _convert_to_decklink_format(self, frame: Frame) -> bytes:
